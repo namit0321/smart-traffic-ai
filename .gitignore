@@ -1,14 +1,36 @@
+# Python environments
 .venv/
-__pycache__/
-.ipynb_checkpoints/
-*.pyc
-.env
+.venv*/
+.venv_backup/
+.venv_old/
+venv/
+env/
 
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+**/.env
+**/.env.*
+.streamlit/secrets.toml
+
+# Node
+node_modules/
+frontend/node_modules/
+dist/
+
+# IDE and OS
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+
+# MLflow
 mlruns/
 mlflow.db
 
-data/raw/
-data/processed/
-
-models/*.pkl
-models/*.h5
+# Logs
+*.log
