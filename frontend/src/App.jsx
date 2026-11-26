@@ -38,11 +38,14 @@ function App() {
     try { return JSON.parse(localStorage.getItem('smartTrafficRoadAlerts') || '[]') } catch { return [] }
   })
   const [trafficOverlayOn, setTrafficOverlayOn] = useState(true)
+  const [rlHeatmapOn, setRlHeatmapOn] = useState(true)
 
   const [searchingSource, setSearchingSource] = useState(false)
   const [searchingDestination, setSearchingDestination] = useState(false)
   const [loadingRoute, setLoadingRoute] = useState(false)
   const [activePanel, setActivePanel] = useState('routes')
+  const [rlResult, setRlResult] = useState(null)
+  const [loadingRL, setLoadingRL] = useState(false)
   const [isNavigating, setIsNavigating] = useState(false)
   const [currentPosition, setCurrentPosition] = useState(null)
   const [gpsStatus, setGpsStatus] = useState('GPS not started')
@@ -527,14 +530,6 @@ function App() {
       return
     }
 
-    const apiKey = import.meta.env.VITE_ORS_API_KEY
-    const weatherKey = import.meta.env.VITE_OPENWEATHER_API_KEY
-
-    if (!apiKey) {
-      alert('OpenRouteService API key is missing. Add VITE_ORS_API_KEY to frontend/.env and restart the frontend.')
-      return
-    }
-
     const sourceCoords = [Number(routeSource.lon), Number(routeSource.lat)]
     const destCoords = [Number(selectedDestination.lon), Number(selectedDestination.lat)]
 
@@ -545,14 +540,15 @@ function App() {
 
     setLoadingRoute(true)
     try {
-      const routeRes = await axios.post(
-        'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
-        {
-          coordinates: [sourceCoords, destCoords],
-          alternative_routes: { target_count: 3, share_factor: 0.6, weight_factor: 1.4 }
-        },
-        { headers: { Authorization: apiKey, 'Content-Type': 'application/json' } }
-      )
+      // Route request goes through FastAPI; the ORS key stays on the backend.
+      const routeRes = await axios.post(`${API_BASE}/route`, {
+        coordinates: [sourceCoords, destCoords],
+        alternative_routes: {
+          target_count: 3,
+          share_factor: 0.6,
+          weight_factor: 1.4
+        }
+      })
 
       const features = (routeRes.data.features || []).filter(
         feature => feature?.geometry?.coordinates?.length && feature?.properties?.summary
@@ -569,6 +565,10 @@ function App() {
       }))
 
       setRoutes(actualRoutes)
+      setRlResult(null)
+      const currentMap = mapRef.current
+      if (currentMap?.getLayer('rl-route-heatmap-line')) currentMap.removeLayer('rl-route-heatmap-line')
+      if (currentMap?.getSource('rl-route-heatmap')) currentMap.removeSource('rl-route-heatmap')
       setSelectedRouteIndex(0)
       const initialRoute = actualRoutes[0]
       setDistance(initialRoute.distance)
@@ -579,9 +579,8 @@ function App() {
 
       // Weather and AI prediction are optional enhancements, not prerequisites for route display.
       try {
-        if (!weatherKey) throw new Error('Weather API key is not configured')
-        const weatherRes = await axios.get('https://api.openweathermap.org/data/2.5/weather', {
-          params: { lat: destCoords[1], lon: destCoords[0], appid: weatherKey }
+        const weatherRes = await axios.get(`${API_BASE}/weather`, {
+          params: { lat: destCoords[1], lon: destCoords[0] }
         })
         const weatherData = weatherRes.data
         const rain = weatherData.rain?.['1h'] || 0
@@ -626,13 +625,110 @@ function App() {
       const status = error.response?.status
       const apiMessage = error.response?.data?.error?.message || error.response?.data?.message || error.response?.data?.detail
       const message = status === 401 || status === 403
-        ? 'OpenRouteService rejected the API key. Check VITE_ORS_API_KEY in frontend/.env.'
+        ? 'OpenRouteService rejected the API key. Check ORS_API_KEY in the root .env file.'
         : status === 429
           ? 'Route service rate limit reached. Please wait a little and try again.'
           : apiMessage || error.message || 'Route search failed. Check your internet connection and API key.'
       alert(message)
     } finally {
       setLoadingRoute(false)
+    }
+  }
+
+  // =========================
+  // RL ROUTE-COST HEATMAP
+  // =========================
+
+  const drawRLHeatmap = (result) => {
+    const map = mapRef.current
+    if (!map || !routes.length || !result?.route_scores?.length) return
+
+    const draw = () => {
+      const sorted = [...result.route_scores].sort(
+        (a, b) => Number(b.q_value) - Number(a.q_value)
+      )
+      const rankByIndex = new Map(sorted.map((item, rank) => [item.route_index, rank]))
+      const features = routes.map((route, index) => {
+        const rank = rankByIndex.get(index) ?? routes.length - 1
+        const band = rank === 0 ? 'best' : rank === routes.length - 1 ? 'high' : 'middle'
+        return {
+          type: 'Feature',
+          properties: { route_index: index, band },
+          geometry: { type: 'LineString', coordinates: route.coordinates }
+        }
+      })
+
+      const collection = { type: 'FeatureCollection', features }
+      if (map.getSource('rl-route-heatmap')) {
+        map.getSource('rl-route-heatmap').setData(collection)
+      } else {
+        map.addSource('rl-route-heatmap', { type: 'geojson', data: collection })
+        map.addLayer({
+          id: 'rl-route-heatmap-line',
+          type: 'line',
+          source: 'rl-route-heatmap',
+          layout: { 'line-join': 'round', 'line-cap': 'round', visibility: rlHeatmapOn ? 'visible' : 'none' },
+          paint: {
+            'line-color': [
+              'match', ['get', 'band'],
+              'best', '#22c55e',
+              'middle', '#f59e0b',
+              '#ef4444'
+            ],
+            'line-width': 10,
+            'line-opacity': 0.55,
+            'line-blur': 1.5
+          }
+        }, map.getLayer('route') ? 'route' : undefined)
+      }
+
+      if (map.getLayer('rl-route-heatmap-line')) {
+        map.setLayoutProperty('rl-route-heatmap-line', 'visibility', rlHeatmapOn ? 'visible' : 'none')
+      }
+    }
+
+    if (map.isStyleLoaded()) draw()
+    else map.once('load', draw)
+  }
+
+  const toggleRLHeatmap = () => {
+    const nextValue = !rlHeatmapOn
+    setRlHeatmapOn(nextValue)
+    const map = mapRef.current
+    if (map?.getLayer('rl-route-heatmap-line')) {
+      map.setLayoutProperty('rl-route-heatmap-line', 'visibility', nextValue ? 'visible' : 'none')
+    }
+  }
+
+  // =========================
+  // REINFORCEMENT LEARNING ROUTE AGENT
+  // =========================
+
+  const runRLAgent = async () => {
+    if (!routes.length) {
+      alert('First generate a route so the RL agent has alternatives to compare.')
+      setActivePanel('routes')
+      return
+    }
+
+    setLoadingRL(true)
+    setRlResult(null)
+    try {
+      const response = await axios.post(`${API_BASE}/rl/recommend`, {
+        routes: routes.map(route => ({
+          distance_km: Number(route.distance),
+          duration_min: Number(route.duration)
+        })),
+        traffic_level: Number(traffic?.prediction ?? 0),
+        episodes: 250
+      })
+      setRlResult(response.data)
+      drawRLHeatmap(response.data)
+    } catch (error) {
+      console.error('RL agent error:', error)
+      alert(error.response?.data?.detail || 'RL agent could not run. Check that the updated backend is running.')
+    } finally {
+      setLoadingRL(false)
     }
   }
 
@@ -852,6 +948,12 @@ function App() {
           <span>◉</span> Traffic AI
         </button>
         <button
+          className={`map-chip ${activePanel === 'rl' ? 'map-chip-active' : ''}`}
+          onClick={() => setActivePanel('rl')}
+        >
+          <span>🧠</span> RL Agent
+        </button>
+        <button
           className={`map-chip ${activePanel === 'alerts' ? 'map-chip-active' : ''}`}
           onClick={() => setActivePanel('alerts')}
         >
@@ -881,6 +983,7 @@ function App() {
                 {activePanel === 'analytics' && 'Trip analytics'}
                 {activePanel === 'saved' && 'Saved places & trips'}
                 {activePanel === 'traffic' && 'Traffic intelligence'}
+                {activePanel === 'rl' && 'Reinforcement learning agent'}
                 {activePanel === 'alerts' && 'Road alerts & safety'}
               </h2>
             </div>
@@ -1068,6 +1171,79 @@ function App() {
                 <p className="panel-footnote">These tiles currently repeat the present model classification as a baseline. True future forecasts require a time-series forecasting endpoint; this app does not claim these are independently predicted future values.</p>
                 <div className="panel-section-title">Live traffic provider</div>
                 <p className="panel-footnote">A real road-by-road heatmap needs a traffic provider/API. The current map uses OpenFreeMap basemap and OpenRouteService routing, neither of which by itself supplies a verified Delhi-NCR live traffic heatmap here.</p>
+              </>
+            )}
+
+            {activePanel === 'rl' && (
+              <>
+                <div className="rl-intro-card">
+                  <div className="rl-icon">🧠</div>
+                  <div>
+                    <strong>Q-Learning Route Agent</strong>
+                    <p>Compares the available routes using a reward based on estimated travel time and distance.</p>
+                  </div>
+                </div>
+
+                <div className="panel-section-title">Agent configuration</div>
+                <div className="rl-metrics-grid">
+                  <div className="analytics-stat"><span>Available actions</span><strong>{routes.length}</strong></div>
+                  <div className="analytics-stat"><span>Training episodes</span><strong>250</strong></div>
+                  <div className="analytics-stat"><span>Traffic state</span><strong>{traffic ? (traffic.label || `Class ${traffic.prediction}`) : 'Low / unknown'}</strong></div>
+                </div>
+
+                <button className="primary-action" onClick={runRLAgent} disabled={loadingRL || routes.length === 0}>
+                  {loadingRL ? 'Training agent…' : '▶ Run RL Agent'}
+                </button>
+                <button className="secondary-action" onClick={toggleRLHeatmap} disabled={!rlResult}>
+                  {rlHeatmapOn ? 'Hide RL route heatmap' : 'Show RL route heatmap'}
+                </button>
+                {rlResult && (
+                  <>
+                    <div className="panel-section-title">RL route-cost heatmap</div>
+                    <div className="traffic-legend rl-heatmap-legend">
+                      <span><i className="legend-green" /> Best RL score</span>
+                      <span><i className="legend-amber" /> Middle</span>
+                      <span><i className="legend-red" /> Higher cost</span>
+                    </div>
+                    <p className="panel-footnote">Colours compare the candidate routes using the RL agent's duration-and-distance reward. This is a route-cost overlay, not a live road-by-road congestion feed.</p>
+                  </>
+                )}
+                {!routes.length && (
+                  <p className="panel-footnote">Generate a journey in the Routes panel first. The agent needs the route alternatives as its available actions.</p>
+                )}
+
+                {rlResult && (
+                  <>
+                    <div className="rl-result-card">
+                      <span className="rl-result-eyebrow">RL RECOMMENDATION</span>
+                      <strong>{rlResult.recommended_route_name}</strong>
+                      <div className="route-card-metrics">
+                        <span>◷ {rlResult.recommended_duration_min} min</span>
+                        <span>↔ {rlResult.recommended_distance_km} km</span>
+                      </div>
+                      <p>Selected action: Route {rlResult.recommended_route_index + 1}</p>
+                    </div>
+
+                    <div className="panel-section-title">Learning results</div>
+                    <div className="rl-metrics-grid">
+                      <div className="analytics-stat"><span>Episodes</span><strong>{rlResult.episodes}</strong></div>
+                      <div className="analytics-stat"><span>Average reward</span><strong>{Number(rlResult.average_reward).toFixed(2)}</strong></div>
+                      <div className="analytics-stat"><span>Best reward</span><strong>{Number(rlResult.best_reward).toFixed(2)}</strong></div>
+                    </div>
+
+                    <div className="panel-section-title">Route Q-values</div>
+                    {rlResult.route_scores.map((item) => (
+                      <div className="rl-score-row" key={item.route_index}>
+                        <div className="distribution-label">
+                          <span>{item.route_name}{item.route_index === rlResult.recommended_route_index ? ' · Recommended' : ''}</span>
+                          <strong>{Number(item.q_value).toFixed(2)}</strong>
+                        </div>
+                        <small>{item.duration_min} min · {item.distance_km} km · reward {Number(item.estimated_reward).toFixed(2)}</small>
+                      </div>
+                    ))}
+                  </>
+                )}
+                <p className="panel-footnote">Demo limitation: rewards are simulated from route duration and distance. The agent is not learning from live vehicle telemetry or verified driver feedback. Its Q-table is held in backend memory and resets when the server restarts.</p>
               </>
             )}
 

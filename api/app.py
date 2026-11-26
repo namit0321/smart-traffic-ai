@@ -4,15 +4,22 @@ from pathlib import Path
 
 import joblib
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from api.rl_agent import router as rl_router
+
 
 # =========================
 # APP CONFIGURATION
 # =========================
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 app = FastAPI(title="Smart Traffic Congestion Predictor")
+app.include_router(rl_router)
 
 FRONTEND_ORIGINS = [
     origin.strip()
@@ -31,11 +38,11 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+
 # =========================
 # LOAD MODEL
 # =========================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "random_forest.pkl"
 
 try:
@@ -48,7 +55,7 @@ except Exception as error:
 
 
 # =========================
-# INPUT SCHEMA
+# INPUT SCHEMAS
 # =========================
 
 class TrafficInput(BaseModel):
@@ -61,6 +68,15 @@ class TrafficInput(BaseModel):
     month: int = Field(..., ge=1, le=12)
     is_weekend: int = Field(..., ge=0, le=1)
     rush_hour: int = Field(..., ge=0, le=1)
+
+
+class RouteInput(BaseModel):
+    coordinates: list[list[float]]
+    alternative_routes: dict = Field(default_factory=lambda: {
+        "target_count": 3,
+        "share_factor": 0.6,
+        "weight_factor": 1.4,
+    })
 
 
 # =========================
@@ -141,7 +157,13 @@ def search_photon(query):
             if isinstance(part, str) and part.strip()
         ))
 
-        add_result(results, lat, lon, display_name or query, "Photon")
+        add_result(
+            results,
+            lat,
+            lon,
+            display_name or query,
+            "Photon"
+        )
 
     return results
 
@@ -222,7 +244,10 @@ def search_location(
         return SEARCH_CACHE[cache_key]
 
     results = []
-    queries_to_try = [query, f"{query}, Delhi NCR, India"]
+    queries_to_try = [
+        query,
+        f"{query}, Delhi NCR, India"
+    ]
 
     for search_query in queries_to_try:
         try:
@@ -259,7 +284,6 @@ def search_location(
     final_results = unique_results[:10]
     SEARCH_CACHE[cache_key] = final_results
 
-    # Prevent the in-memory cache from growing indefinitely.
     if len(SEARCH_CACHE) > 500:
         SEARCH_CACHE.pop(next(iter(SEARCH_CACHE)))
 
@@ -311,3 +335,89 @@ def predict(data: TrafficInput):
         "model": "Random Forest",
         "prediction_type": "weather_and_time_based_estimate",
     }
+
+
+# =========================
+# ROUTE SERVICE - OPENROUTESERVICE
+# =========================
+
+@app.post("/route")
+def get_route(data: RouteInput):
+    api_key = os.getenv("ORS_API_KEY")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="ORS_API_KEY missing from root .env"
+        )
+
+    if len(data.coordinates) != 2 or any(
+        len(point) != 2 for point in data.coordinates
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Two [longitude, latitude] coordinates are required."
+        )
+
+    try:
+        response = requests.post(
+            "https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson",
+            json={
+                "coordinates": data.coordinates,
+                "alternative_routes": data.alternative_routes,
+            },
+            headers={
+                "Authorization": api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+
+        if not response.ok:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=response.text[:1000],
+            )
+
+        return response.json()
+
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Route provider connection failed: {error}"
+        )
+
+
+# =========================
+# WEATHER SERVICE - OPENWEATHER
+# =========================
+
+@app.get("/weather")
+def get_weather(lat: float, lon: float):
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENWEATHER_API_KEY missing from root .env"
+        )
+
+    try:
+        response = requests.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={
+                "lat": lat,
+                "lon": lon,
+                "appid": api_key,
+            },
+            timeout=15,
+        )
+
+        response.raise_for_status()
+        return response.json()
+
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Weather provider connection failed: {error}"
+        )

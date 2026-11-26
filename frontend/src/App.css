@@ -413,3 +413,19 @@ body,
 .road-alert-map-marker { width:30px; height:30px; display:grid; place-items:center; border:2px solid white; border-radius:50% 50% 50% 0; transform:rotate(-45deg); background:#f59e0b; color:#111827; font-size:15px; box-shadow:0 2px 8px rgba(0,0,0,.25); }
 .road-alert-map-marker::first-letter { transform:rotate(45deg); }
 @media(max-width:760px) { .forecast-grid { gap:6px; } .forecast-tile { padding:8px 6px; } }
+
+
+/* Reinforcement Learning panel */
+.rl-intro-card { display:flex; align-items:flex-start; gap:12px; padding:14px; border:1px solid #dbeafe; border-radius:14px; background:#f8fbff; }
+.rl-icon { display:grid; place-items:center; flex:0 0 42px; width:42px; height:42px; border-radius:12px; background:#eaf1ff; font-size:22px; }
+.rl-intro-card strong { display:block; color:#172033; font-size:14px; }
+.rl-intro-card p { margin:5px 0 0; color:#64748b; font-size:12px; line-height:1.5; }
+.rl-metrics-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin:10px 0 14px; }
+.rl-metrics-grid .analytics-stat { min-width:0; }
+.rl-metrics-grid .analytics-stat strong { overflow-wrap:anywhere; font-size:17px; }
+.rl-result-card { margin-top:14px; padding:15px; border:1px solid #bfdbfe; border-radius:14px; background:#eff6ff; }
+.rl-result-eyebrow { display:block; margin-bottom:7px; color:#2563eb; font-size:10px; font-weight:800; letter-spacing:1px; }
+.rl-result-card > strong { display:block; color:#172033; font-size:17px; }
+.rl-result-card p { margin:8px 0 0; color:#64748b; font-size:12px; }
+.rl-score-row { padding:10px 0; border-bottom:1px solid #e2e8f0; }
+.rl-score-row small { display:block; margin-top:5px; color:#64748b; font-size:11px; }
